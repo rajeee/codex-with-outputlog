@@ -9,6 +9,8 @@ use crate::command_safety::is_safe_command::is_known_safe_command;
 use crate::exec::ExecToolCallOutput;
 use crate::protocol::SandboxPolicy;
 use crate::sandboxing::execute_env;
+use crate::tools::command_logger::exec_output_from_error;
+use crate::tools::command_logger::log_command_output;
 use crate::tools::runtimes::build_command_spec;
 use crate::tools::sandboxing::Approvable;
 use crate::tools::sandboxing::ApprovalCtx;
@@ -25,6 +27,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
 use futures::future::BoxFuture;
 use std::path::PathBuf;
+use tracing::warn;
 
 #[derive(Clone, Debug)]
 pub struct ShellRequest {
@@ -168,9 +171,26 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         let env = attempt
             .env_for(&spec)
             .map_err(|err| ToolError::Codex(err.into()))?;
-        let out = execute_env(&env, attempt.policy, Self::stdout_stream(ctx))
-            .await
-            .map_err(ToolError::Codex)?;
-        Ok(out)
+        let codex_home = ctx.session.codex_home().await;
+        match execute_env(&env, attempt.policy, Self::stdout_stream(ctx)).await {
+            Ok(out) => {
+                if let Err(err) =
+                    log_command_output(&codex_home, &req.command, &req.cwd, &out).await
+                {
+                    warn!("failed to write command log: {err}");
+                }
+                Ok(out)
+            }
+            Err(err) => {
+                if let Some(output) = exec_output_from_error(&err) {
+                    if let Err(log_err) =
+                        log_command_output(&codex_home, &req.command, &req.cwd, output).await
+                    {
+                        warn!("failed to write command log: {log_err}");
+                    }
+                }
+                Err(ToolError::Codex(err))
+            }
+        }
     }
 }

@@ -1,3 +1,4 @@
+pub(crate) mod command_logger;
 pub mod context;
 pub mod events;
 pub(crate) mod handlers;

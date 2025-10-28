@@ -8,6 +8,8 @@ use crate::CODEX_APPLY_PATCH_ARG1;
 use crate::exec::ExecToolCallOutput;
 use crate::sandboxing::CommandSpec;
 use crate::sandboxing::execute_env;
+use crate::tools::command_logger::exec_output_from_error;
+use crate::tools::command_logger::log_command_output;
 use crate::tools::sandboxing::Approvable;
 use crate::tools::sandboxing::ApprovalCtx;
 use crate::tools::sandboxing::ProvidesSandboxRetryData;
@@ -24,6 +26,7 @@ use codex_protocol::protocol::ReviewDecision;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tracing::warn;
 
 #[derive(Clone, Debug)]
 pub struct ApplyPatchRequest {
@@ -155,9 +158,30 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
         let env = attempt
             .env_for(&spec)
             .map_err(|err| ToolError::Codex(err.into()))?;
-        let out = execute_env(&env, attempt.policy, Self::stdout_stream(ctx))
-            .await
-            .map_err(ToolError::Codex)?;
-        Ok(out)
+        let mut command_for_log = Vec::with_capacity(1 + spec.args.len());
+        command_for_log.push(spec.program.clone());
+        command_for_log.extend(spec.args.iter().cloned());
+
+        let codex_home = ctx.session.codex_home().await;
+        match execute_env(&env, attempt.policy, Self::stdout_stream(ctx)).await {
+            Ok(out) => {
+                if let Err(err) =
+                    log_command_output(&codex_home, &command_for_log, &spec.cwd, &out).await
+                {
+                    warn!("failed to write command log: {err}");
+                }
+                Ok(out)
+            }
+            Err(err) => {
+                if let Some(output) = exec_output_from_error(&err) {
+                    if let Err(log_err) =
+                        log_command_output(&codex_home, &command_for_log, &spec.cwd, output).await
+                    {
+                        warn!("failed to write command log: {log_err}");
+                    }
+                }
+                Err(ToolError::Codex(err))
+            }
+        }
     }
 }

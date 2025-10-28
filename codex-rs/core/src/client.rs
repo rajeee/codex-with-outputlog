@@ -58,6 +58,7 @@ use crate::protocol::RateLimitWindow;
 use crate::protocol::TokenUsage;
 use crate::state::TaskKind;
 use crate::token_data::PlanType;
+use crate::tools::command_logger::log_network_exchange;
 use crate::tools::spec::create_tools_json_for_responses_api;
 use crate::util::backoff;
 
@@ -300,13 +301,13 @@ impl ModelClient {
     ) -> std::result::Result<ResponseStream, StreamAttemptError> {
         // Always fetch the latest auth in case a prior attempt refreshed the token.
         let auth = auth_manager.as_ref().and_then(|m| m.auth());
+        let codex_home = self.config.codex_home.clone();
 
-        trace!(
-            "POST to {}: {:?}",
-            self.provider.get_full_url(&auth),
-            serde_json::to_string(payload_json)
-                .unwrap_or("<unable to serialize payload>".to_string())
-        );
+        let request_url = self.provider.get_full_url(&auth);
+        let request_body = serde_json::to_string(payload_json)
+            .unwrap_or_else(|_| "<unable to serialize payload>".to_string());
+
+        trace!("POST to {}: {:?}", request_url, request_body);
 
         let mut req_builder = self
             .provider
@@ -334,6 +335,22 @@ impl ModelClient {
             .otel_event_manager
             .log_request(attempt, || req_builder.send())
             .await;
+
+        let response_summary = match &res {
+            Ok(resp) => format!("status: {} (response body streamed via SSE)", resp.status()),
+            Err(error) => format!("error: {error}"),
+        };
+
+        if let Err(err) = log_network_exchange(
+            &codex_home,
+            "responses_api",
+            &format!("POST {request_url}\n{request_body}"),
+            &response_summary,
+        )
+        .await
+        {
+            warn!("failed to write network log: {err}");
+        }
 
         let mut request_id = None;
         if let Ok(resp) = &res {
